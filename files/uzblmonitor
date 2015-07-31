@@ -1,9 +1,13 @@
 #!/usr/bin/env python
 
+import argparse
 import ConfigParser
 import json
 import logging
 import os
+from pipes import quote
+import random
+import shutil
 import signal
 import socket
 from subprocess import Popen
@@ -12,197 +16,177 @@ import threading
 import time
 import urlparse
 
+
 CONFIG_FILE = "/etc/uzblmonitor.conf"
 
 log = logging.getLogger("uzblmonitor")
 
-
-class Browser(object):
-
-    p = None
-    sock = None
-    url = None
-    should_stop = False
-
-    def start(self):
-        log.info("Starting browser")
-
-        self.should_stop = False
-
-        self.p = Popen(self.browser_command, stderr=open(os.devnull, 'w'))
-        log.info("Started subprocess %d", self.p.pid)
-
-    def stop(self):
-        log.info("Stopping browser")
-
-        self.should_stop = True
-
-    def exit(self):
-        if self.p:
-            self.p.terminate()
-            self.p = None
-
-        if self.sock:
-            self.sock.close()
-            self.sock = None
-
-    def read_config(self):
-        config = ConfigParser.RawConfigParser()
-        config.read(CONFIG_FILE)
-        return config
-
-    def reload_config(self):
-        log.info("Reloading config")
-        self.exit()
-        self.start()
-
-    def wait_for_stop(self):
-        while not self.should_stop:
-            time.sleep(1)
-
-        log.info("Received stop notification; exiting")
-        self.exit()
+CTMPL_FORMAT = """
+[uzblmonitor]
+mode: {{ key "service/uzblmonitor2/hosts/%(id)s/mode" }}
+value: {{ key "service/uzblmonitor2/hosts/%(id)s/value" }}
+"""
 
 
-class Uzbl(Browser):
-    browser_command = ["/usr/bin/uzbl-browser"]
-    socket_format = "/tmp/uzbl_socket_{0}"
+def clear_directory(directory):
+    try:
+        shutil.rmtree(directory)
+    except OSError:
+        pass
+    os.mkdir(directory)
 
-    def start(self):
-        super(Uzbl, self).start()
 
-        self.sock = self._wait_for_socket()
-        self.sock.settimeout(1)
-        threading.Thread(target=self._start_socket_reader).start()
+def supervise(directory, identity, x, y, width, height):
+    clear_directory(directory)
+    with open(os.path.join(directory, 'ctmpl'), 'w') as ctmpl:
+        ctmpl.write(CTMPL_FORMAT % {'id': identity})
 
-        self.send_initial_cmds()
-        self.reload_config()
+    cmd = ' '.join([
+        quote(sys.argv[0]),
+        '--background',
+        '--x', quote(str(x)),
+        '--y', quote(str(y)),
+        '--width', quote(str(width)),
+        '--height', quote(str(height)),
+        '--identity', quote(identity),
+    ])
+    print repr(cmd)
+    return Popen(['consul-template', '--template', "ctmpl:config:%s" % cmd],
+                 cwd=directory)
 
-    def reload_config(self):
-        log.info("Reloading config")
 
-        if not os.path.isfile(CONFIG_FILE):
-            return
+def root(identity, x, y, width, height):
+    supervise('uzblmonitor_data', identity, x, y, width, height).wait()
 
-        config = self.read_config()
-        url = config.get('uzblmonitor', 'url')
 
-        if not url:
-            fqdn = socket.getfqdn()
-            html = "<h1 style='font-size: 400%'>{0}</h1>".format(fqdn)
-            url = """javascript:document.write("{0}")""".format(html)
+def columns(arg, identity, x, y, width, height):
+    clear_directory('left')
+    clear_directory('right')
+    left = supervise('left', '/'.join([identity, 'left']), x, y, width/2, height)
+    right = supervise('right', '/'.join([identity, 'right']), x+width/2, y, width/2, height)
+    return max(left.wait(), right.wait())
 
-        if url != self.url:
-            self.url = url
-            self.update_uzbl()
 
-    def send_cmd(self, cmd):
-        log.debug("Sending cmd: %s", cmd)
+def rows(arg, identity, x, y, width, height):
+    clear_directory('top')
+    clear_directory('bottom')
+    top = supervise('top', '/'.join([identity, 'top']), x, y, width, height/2)
+    bottom = supervise('bottom', '/'.join([identity, 'bottom']), x, y+height/2, width, height/2)
+    return max(top.wait(), bottom.wait())
 
-        while not self.should_stop:
-            try:
-                self.sock.sendall(cmd + '\n')
-                return
-            except socket.timeout:
-                continue
-            except socket.error:
-                time.sleep(.5)
 
-    def update_uzbl(self):
-        self.send_cmd("set uri={0}".format(self.url))
+def geometry_string(x, y, width, height):
+    return '%dx%d+%d+%d' % (width, height, x, y)
 
-    def send_initial_cmds(self):
-        self.send_cmd("set show_status=0")
-        self.send_cmd("set geometry=maximized")
 
-    @property
-    def socket_filename(self):
-        return self.socket_format.format(self.p.pid)
-
-    def _wait_for_socket(self):
-        log.info("Waiting for socket connection")
-
-        while True:
-            try:
-                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                sock.connect(self.socket_filename)
+def start_xnest(identity, x, y, width, height):
+    order = range(100)
+    random.shuffle(order)
+    for display in order:
+        print "RCHOERCHOEURCHOEUrch DISPLAY %d" % display
+        p = Popen(['Xnest', ':%d' % display, '-s', '0,', '-retro', '-geometry',
+                   geometry_string(x, y, width, height)])
+        # TODO: instead of just assuming things are fine if it hasn't crashed
+        # after 1 second, let's
+        for _ in range(10):
+            if p.poll() is not None:
                 break
-            except socket.error:
-                time.sleep(.5)
-
-        log.info("Socket connected")
-
-        return sock
-
-    def _start_socket_reader(self):
-        while not self.should_stop:
-            data = None
-
-            try:
-                data = self.sock.recv(1024)
-            except socket.timeout:
-                continue
-            except socket.error:
-                time.sleep(.5)
-                continue
-
-            if data:
-                log.debug("Data from uzbl: %r", data)
-            else:
-                time.sleep(.5)
+            time.sleep(0.1)
+        else:
+            return (p, ':%d' % display)
+    raise Exception("ohgodwhat")
 
 
-class LuaKit(Browser):
-    @property
-    def browser_command(self):
-        config = self.read_config()
-        url = config.get('uzblmonitor', 'url')
-        return ["/usr/bin/luakit", "-c", "/etc/xdg/luakit/uzblmonitor.lua", insert_basic_auth(url)]
+def browser(url, identity, x, y, width, height):
+    xnest, display = start_xnest(identity, x, y, width, height)
+    children = [
+        xnest,
+        Popen(
+            ["/usr/bin/luakit", "--nounique", "-c", "/etc/xdg/luakit/uzblmonitor.lua",
+             insert_basic_auth(url)],
+            env=dict(os.environ, DISPLAY=display),
+        ),
+        Popen(
+            ['matchbox-window-manager', '-use_titlebar', 'no'],
+            env=dict(os.environ, DISPLAY=display)
+        ),
+    ]
+    return max([c.wait() for c in children])
 
 
 def insert_basic_auth(url, filename="/etc/uzblmonitor-auth.json"):
     with open(filename) as f:
         auth_dict = json.load(f)
+        parsed = list(urlparse.urlsplit(url))
+        hostname = parsed[1]
 
-    parsed = list(urlparse.urlsplit(url))
-    hostname = parsed[1]
+        for entry in auth_dict['entries']:
+            if hostname == entry['domain']:
+                parsed[1] = '%s:%s@%s' % (
+                    entry['username'],
+                    entry['password'],
+                    parsed[1]
+                )
+                return urlparse.urlunsplit(parsed)
 
-    for entry in auth_dict['entries']:
-        if hostname == entry['domain']:
-            parsed[1] = '%s:%s@%s' % (entry['username'], entry['password'], parsed[1])
-            return urlparse.urlunsplit(parsed)
-
-    return url
+        return url
 
 
-def set_up_signal_handlers(browser):
-    def signal_exit(sig, _):
-        log.info("Got signal %d, exiting.", sig)
-        browser.stop()
-
-    def signal_reload_config(sig, _):
-        log.info("Got signal %d, reloading config.", sig)
-        browser.reload_config()
-
-    log.debug("Setting up signal handlers")
-
-    signal.signal(signal.SIGINT, signal_exit)
-    signal.signal(signal.SIGTERM, signal_exit)
-    signal.signal(signal.SIGHUP, signal_reload_config)
+def terminal(command, identity, x, y, width, height):
+    return Popen(['xterm', '-geometry', geometry_string(x, y, width, height),
+           '-e', command]).wait()
 
 
 def main():
-    logging.basicConfig(level=logging.DEBUG)
+    # args:
+    # x
+    # y
+    # width
+    # height
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--background', action='store_true', default=False)
+    parser.add_argument('--identity', type=str, default=socket.getfqdn())
+    parser.add_argument('--x', type=int, default=0)
+    parser.add_argument('--y', type=int, default=0)
+    parser.add_argument('--width', type=int, default=1920)
+    parser.add_argument('--height', type=int, default=1080)
 
-    BrowserClass = {
-        "uzbl": Uzbl,
-        "luakit": LuaKit,
-    }[sys.argv[1] if len(sys.argv) > 1 else "uzbl"]
+    args = parser.parse_args()
 
-    browser = BrowserClass()
-    set_up_signal_handlers(browser)
-    browser.start()
-    browser.wait_for_stop()
+    if args.background:
+        if os.fork():
+            # the parent exits
+            sys.exit()
+
+    try:
+        with open('pidfile') as pf:
+            os.kill(int(pf.read()), 15)
+    except:
+        # no worries if the pidfile doesn't exist, process doesn't exist, etc.
+        pass
+
+    with open('pidfile', 'w') as pf:
+        pf.write("%d" % os.getpid())
+
+    if os.path.exists('config'):
+        config = ConfigParser.RawConfigParser()
+        config.read('config')
+        func = {
+            'url': browser,
+            'command': terminal,
+            'horizontal-split': rows,
+            'vertical-split': columns,
+        }[config.get('uzblmonitor', 'mode')]
+        sys.exit(func(
+            config.get('uzblmonitor', 'value'),
+            args.identity,
+            args.x,
+            args.y,
+            args.width,
+            args.height,
+        ))
+    else:
+        root(args.identity, args.x, args.y, args.width, args.height)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
 #!/bin/bash
 xset -dpms
 xset s off
-exec matchbox-window-manager -use_titlebar no
+exec sleep infinity
