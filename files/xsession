@@ -1,6 +1,10 @@
 #!/bin/bash
 xset -dpms
 xset s off
+
+connected_port=$(xrandr --current |grep '\bconnected ' |cut -d ' ' -f1)
+# For some reason this is necessary to get some of the Sony TVs to see a signal.
+xrandr --output $connected_port --off && xrandr --output $connected_port --auto
 # Force UHD (usually native panel resolution) instead of 4k
-xrandr --current |grep -q 'connected 4096x2160' && xrandr --output $(xrandr --current |grep 'connected 4096x2160' |cut -d ' ' -f1) --mode 3840x2160
+xrandr --current |grep -q 'connected 4096x2160' && xrandr --output $connected_port --mode 3840x2160
 exec sleep infinity

@@ -214,8 +214,12 @@ def parse_userscript_metadata(f):
 
 
 def insert_basic_auth(url, filename="/etc/uzblmonitor-auth.json"):
-    with open(filename) as f:
-        auth_dict = json.load(f)
+    try:
+        with open(filename) as f:
+            auth_dict = json.load(f)
+    except IOError as e:
+        log.warning("Caught %s when trying to look up basic auth credentials from %s -- ignoring" % (e, filename))
+        return url
 
     parsed = list(urlparse.urlsplit(url))
     hostname = parsed[1]
