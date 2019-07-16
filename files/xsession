@@ -2,7 +2,7 @@
 xset -dpms
 xset s off
 
-connected_port=$(xrandr --current |grep '\bconnected ' |cut -d ' ' -f1)
+connected_port=$(xrandr --current |grep ' connected [0-9]*x[0-9]' |cut -d ' ' -f1)
 # For some reason this is necessary to get some of the Sony TVs to see a signal.
 xrandr --output $connected_port --off && xrandr --output $connected_port --auto
 # Force UHD (usually native panel resolution) instead of 4k
